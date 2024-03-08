@@ -864,5 +864,5 @@ if __name__ == "__main__":
     print("shape of out", out['L_f_r'].shape, out['L_r_f'].shape, out['P_f'].shape, out['P_r'].shape, out['posterior'].shape)
     print("Loss L_f_r", out['L_f_r'])
     print("Loss L_r_f", out['L_r_f'])
-    # Output are: the loss L_f-r, the loss L_r-f, the flow posterior P_f, the rgb posterior P_r, and the posterior distribution for each query sample
+    # Outputs are: the loss L_f-r, the loss L_r-f, the flow posterior P_f, the rgb posterior P_r, and the posterior distribution for each query sample
 
