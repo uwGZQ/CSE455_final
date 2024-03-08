@@ -12,10 +12,10 @@ import torchvision.models as models
 
 NUM_SAMPLES=1
 
-np.random.seed(3483)
-torch.manual_seed(3483)
-torch.cuda.manual_seed(3483)
-torch.cuda.manual_seed_all(3483)
+# np.random.seed(3483)
+# torch.manual_seed(3483)
+# torch.cuda.manual_seed(3483)
+# torch.cuda.manual_seed_all(3483)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -657,21 +657,40 @@ class AAS(nn.Module):
     def __init__(self, args):
         super(AAS, self).__init__()
         self.args = args
-        self.backbone = Backbone(args)
+        self.rgb_Posterior = ModalitySpecificPosterior(args)
+        self.flow_Posterior = ModalitySpecificPosterior(args)
     def forward(self, x):
-        pass
         # context rgb features: torch.Size([self.way, 2048]) -> 5, 2048
         # context flow features: torch.Size([self.way, 1024])
         # target rgb features: torch.Size([self.query_per_class * self.way, 2048]) -> 20, 2048
         # target flow features: torch.Size([self.query_per_class * self.way, 1024])
-        
+        context_rgb_features = x['context_rgb_features']
+        context_flow_features = x['context_flow_features']
+        target_rgb_features = x['target_rgb_features']
+        target_flow_features = x['target_flow_features']
+        p_r, c_r, h_r = self.rgb_Posterior(context_rgb_features, target_rgb_features)
+        p_f, c_f, h_f = self.flow_Posterior(context_flow_features, target_flow_features)
+        # For each query sample, if a specific modality achieves high absolute certainty and relative certainty, this modality is re- liable enough to express discriminative action characteris- tic in the few-shot task. Conversely, if the certainty is low, the modality is probably unreliable to identify actions in the few-shot task. To facilitate the exploring of cross-modal complementarity, we select query samples with large differ- ences in the reliability of two modalities and organize them into two group
+        # To facilitate the exploring of cross-modal complementarity, we select query samples with large differ- ences in the reliability of two modalities and organize them into two groups:
+        # Q_r = {(x_i^r, x_i^f) | h_i^r > h_i^f, c_i^r > c_i^f}
+        # Q_f = {(x_i^r, x_i^f) | h_i^r < h_i^f, c_i^r < c_i^f}
+        Q_r = []
+        Q_f = []
+
+        for i in range(len(c_r)):
+            if h_r[i] > h_f[i] and c_r[i] > c_f[i]:
+                Q_r.append((target_rgb_features[i], target_flow_features[i]))
+            else:
+                Q_f.append((target_rgb_features[i], target_flow_features[i]))
+        return {"Q_r": Q_r, "Q_f": Q_f, "p_r": p_r, "c_r": c_r, "h_r": h_r, "p_f": p_f, "c_f": c_f, "h_f": h_f}
+
 class ModalitySpecificPosterior(nn.Module):
     def __init__(self, args):
         super(ModalitySpecificPosterior, self).__init__()
         self.args = args
         self.psi = nn.PairwiseDistance(p=2)
         
-    def forward(self, query_features, class_prototypes):
+    def forward(self, class_prototypes,query_features ):
         """
         Compute the modality-specific posterior distribution for each query sample.
         Args:
@@ -680,19 +699,25 @@ class ModalitySpecificPosterior(nn.Module):
         Returns:
             posterior: Tensor of shape (num_queries, num_classes) containing the posterior distribution for each query sample.
         """
+        print("query_features", query_features)
+        print("class_prototypes", class_prototypes)
+
         num_queries = query_features.size(0)
         num_classes = class_prototypes.size(0)
         posterior = torch.zeros(num_queries, num_classes)
+
         
         for i in range(num_queries):
             for k in range(num_classes):
                 distance = self.psi(query_features[i], class_prototypes[k])
                 posterior[i, k] = torch.exp(-distance)
-        print(posterior)
         posterior = posterior / torch.sum(posterior, dim=1, keepdim=True)
         
         # We define the absolute certainty c_m^i as the maximum element of the modality-specific posterior distribution:
         c = torch.max(posterior, dim=1)[0]
+
+        print("c", c)
+        print("posterior", posterior)
         # we define the relative certainty h_m^i as the nega- tive self-entropy of the modality-specific posterior distribu- tion:
         h = -torch.sum(posterior * torch.log(posterior), dim=1)
         return posterior, c, h
@@ -700,6 +725,99 @@ class ModalitySpecificPosterior(nn.Module):
 
 
 
+class AMD(nn.Module):
+    def __init__(self, args):
+        super(AMD, self).__init__()
+        self.args = args
+        self.KLDivLoss = torch.nn.KLDivLoss()
+
+    def forward(self, x):
+        Q_r = x['Q_r']
+        Q_f = x['Q_f']
+        p_r = x['p_r']
+        c_r = x['c_r']
+        p_f = x['p_f']
+        c_f = x['c_f']
+        L_f_r = 0
+        L_r_f = 0
+        for i in range(len(Q_f)):
+            L_f_r += c_f[i] * self.KLDivLoss(p_r[i], p_f[i])
+        for i in range(len(Q_r)):
+            L_r_f += c_r[i] * self.KLDivLoss(p_f[i], p_r[i])
+        print("pf shape", p_f.shape)
+        print("pr shape", p_r.shape)
+        print("cr shape", c_r.shape)
+        print("cf shape", c_f.shape)
+        print("Q_f shape", len(Q_f))
+        print("Q_r shape", len(Q_r))
+        print("c_f", c_f)
+        print("c_r", c_r)
+
+        L_f_r = L_f_r / torch.sum(c_f)
+        L_r_f = L_r_f / torch.sum(c_r)
+        print("L_f_r", L_f_r)
+        print("L_r_f", L_r_f)
+        # import sys
+        # sys.exit()
+
+        return L_f_r, L_r_f
+        
+
+class AMI(nn.Module):
+    def __init__(self, args):
+        super(AMI, self).__init__()
+        self.args = args
+    def forward(self, x, output_AAS):
+        context_rgb_features = x['context_rgb_features']
+        context_flow_features = x['context_flow_features']
+        target_rgb_features = x['target_rgb_features']
+        target_flow_features = x['target_flow_features']
+        c_r = output_AAS['c_r']
+        c_f = output_AAS['c_f']
+        w_r = c_r / (c_r + c_f)
+        w_f = c_f / (c_r + c_f)
+        num_queries = target_rgb_features.size(0)
+        num_classes = context_rgb_features.size(0)
+        posterior = torch.zeros(num_queries, num_classes)
+        print("shapes")
+        print("target_rgb_features", target_rgb_features.shape)
+        print("context_rgb_features", context_rgb_features.shape)
+        print("target_flow_features", target_flow_features.shape)
+        print("context_flow_features", context_flow_features.shape)
+        print("w_r", w_r.shape)
+        print("w_f", w_f.shape)
+        for i in range(num_queries):
+            for k in range(num_classes):
+                distance_rgb = torch.nn.PairwiseDistance(p=2)(target_rgb_features[i], context_rgb_features[k])
+                distance_flow = torch.nn.PairwiseDistance(p=2)(target_flow_features[i], context_flow_features[k])
+                print("distance_rgb", distance_rgb)
+                print("distance_flow", distance_flow)
+                print("i",i)
+                print("w_r[i]", w_r[i])
+                print("w_f[i]", w_f[i])
+
+                print("torch.exp(-distance_rgb)", torch.exp(-distance_rgb))
+                print("torch.exp(-distance_flow)", torch.exp(-distance_flow))
+                posterior[i, k] = w_r[i] * torch.exp(-distance_rgb) + w_f[i] * torch.exp(-distance_flow)
+        posterior = posterior / torch.sum(posterior, dim=1, keepdim=True)
+        return posterior
+
+
+class AMFAR(nn.Module):
+    def __init__(self, args):
+        super(AMFAR, self).__init__()
+        self.args = args
+        self.AAS = AAS(args)
+        self.AMD = AMD(args)
+        self.AMI = AMI(args)
+    def forward(self, x):
+        output_AAS = self.AAS(x)
+        P_r = output_AAS['p_r']
+        P_f = output_AAS['p_f']
+        L_f_r, L_r_f = self.AMD(output_AAS)
+        posterior = self.AMI(x,output_AAS)
+        return {"L_f_r": L_f_r, "L_r_f": L_r_f, "P_f": P_f, "P_r": P_r, "posterior": posterior}
+        # return L_f_r, L_r_f, P_f, P_r, posterior
 
 
 
@@ -733,11 +851,18 @@ if __name__ == "__main__":
     # print("STRM returns the distances from each query to each class prototype.  Use these as logits.  Shape: {}".format(out['logits_post_pat'].shape))
     # example use for ModalitySpecificPosterior
     args = ArgsObject()
-    model = ModalitySpecificPosterior(args)
-    query_features = torch.rand(20, 2048)
-    class_prototypes = torch.rand(5, 2048)
-    posterior,c,h = model(query_features, class_prototypes)
-    print(posterior,c,h)
-
-
+    model = AMFAR(args)
+    context_rgb_features = torch.rand(5, 2048)
+    context_flow_features = torch.rand(5, 1024)
+    target_rgb_features = torch.rand(20, 2048)
+    target_flow_features = torch.rand(20, 1024)
+    print("context_rgb_features", context_rgb_features)
+    print("context_flow_features", context_flow_features)
+    print("target_rgb_features", target_rgb_features)
+    print("target_flow_features", target_flow_features)
+    out = model({"context_rgb_features": context_rgb_features, "context_flow_features": context_flow_features, "target_rgb_features": target_rgb_features, "target_flow_features": target_flow_features})
+    print("shape of out", out['L_f_r'].shape, out['L_r_f'].shape, out['P_f'].shape, out['P_r'].shape, out['posterior'].shape)
+    print("Loss L_f_r", out['L_f_r'])
+    print("Loss L_r_f", out['L_r_f'])
+    # Output are: the loss L_f-r, the loss L_r-f, the flow posterior P_f, the rgb posterior P_r, and the posterior distribution for each query sample
 
