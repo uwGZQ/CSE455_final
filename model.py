@@ -630,7 +630,7 @@ class RGB_Strm_Backbone(nn.Module):
         # random.shuffle(context_group)
         # context_features, context_labels = zip(*context_group)
 
-
+# python run.py -c checkpoint_dir_ucf/ --query_per_class 4 --shot 5 --way 5 --trans_linear_out_dim 1152 --test_iters 10000 --dataset ucf --split 3 -lr 0.0001 --img_size 224 --scratch new --num_gpus 0 --method resnet50 --save_freq 10000 --print_freq 1 --training_iterations 20010 --temp_set 2
 
         return {'context_features': context_features, 
                     'target_features': target_features}
@@ -660,7 +660,42 @@ class AAS(nn.Module):
         self.backbone = Backbone(args)
     def forward(self, x):
         pass
-        # features: 
+        # context rgb features: torch.Size([self.way, 2048]) -> 5, 2048
+        # context flow features: torch.Size([self.way, 1024])
+        # target rgb features: torch.Size([self.query_per_class * self.way, 2048]) -> 20, 2048
+        # target flow features: torch.Size([self.query_per_class * self.way, 1024])
+        
+class ModalitySpecificPosterior(nn.Module):
+    def __init__(self, args):
+        super(ModalitySpecificPosterior, self).__init__()
+        self.args = args
+        self.psi = nn.PairwiseDistance(p=2)
+        
+    def forward(self, query_features, class_prototypes):
+        """
+        Compute the modality-specific posterior distribution for each query sample.
+        Args:
+            query_features: Tensor of shape (num_queries, feature_dim) containing the query features.
+            class_prototypes: Tensor of shape (num_classes, feature_dim) containing the class prototypes.
+        Returns:
+            posterior: Tensor of shape (num_queries, num_classes) containing the posterior distribution for each query sample.
+        """
+        num_queries = query_features.size(0)
+        num_classes = class_prototypes.size(0)
+        posterior = torch.zeros(num_queries, num_classes)
+        
+        for i in range(num_queries):
+            for k in range(num_classes):
+                distance = self.psi(query_features[i], class_prototypes[k])
+                posterior[i, k] = torch.exp(-distance)
+        print(posterior)
+        posterior = posterior / torch.sum(posterior, dim=1, keepdim=True)
+        
+        # We define the absolute certainty c_m^i as the maximum element of the modality-specific posterior distribution:
+        c = torch.max(posterior, dim=1)[0]
+        # we define the relative certainty h_m^i as the nega- tive self-entropy of the modality-specific posterior distribu- tion:
+        h = -torch.sum(posterior * torch.log(posterior), dim=1)
+        return posterior, c, h
 
 
 
@@ -683,20 +718,26 @@ if __name__ == "__main__":
             self.method = "resnet50"
             self.num_gpus = 1
             self.temp_set = [2,3]
-    args = ArgsObject()
-    # torch.manual_seed(CNN_STRM(args))
-    # model = CNN_STRM(args)
-    model = RGB_Strm_Backbone(args)
-    support_imgs = torch.rand(args.way * args.shot * args.seq_len,3, args.img_size, args.img_size)
-    target_imgs = torch.rand(args.way * args.query_per_class * args.seq_len ,3, args.img_size, args.img_size)
-    support_labels = torch.tensor([0,1,2,3,4])
+    # args = ArgsObject()
+    # # torch.manual_seed(CNN_STRM(args))
+    # # model = CNN_STRM(args)
+    # model = RGB_Strm_Backbone(args)
+    # support_imgs = torch.rand(args.way * args.shot * args.seq_len,3, args.img_size, args.img_size)
+    # target_imgs = torch.rand(args.way * args.query_per_class * args.seq_len ,3, args.img_size, args.img_size)
+    # support_labels = torch.tensor([0,1,2,3,4])
 
-    out = model(support_imgs, support_labels, target_imgs)
-    print("returns context feature shape ",out['context_features'].shape)
-    print("returns target feature shape ",out['target_features'].shape)
+    # out = model(support_imgs, support_labels, target_imgs)
+    # print("returns context feature shape ",out['context_features'].shape)
+    # print("returns target feature shape ",out['target_features'].shape)
     # print("STRM returns the distances from each query to each class prototype.  Use these as logits.  Shape: {}".format(out['logits'].shape))
     # print("STRM returns the distances from each query to each class prototype.  Use these as logits.  Shape: {}".format(out['logits_post_pat'].shape))
-
+    # example use for ModalitySpecificPosterior
+    args = ArgsObject()
+    model = ModalitySpecificPosterior(args)
+    query_features = torch.rand(20, 2048)
+    class_prototypes = torch.rand(5, 2048)
+    posterior,c,h = model(query_features, class_prototypes)
+    print(posterior,c,h)
 
 
 
