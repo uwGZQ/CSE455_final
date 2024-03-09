@@ -134,19 +134,38 @@ def sample_normal(mean, var, num_samples):
     normal_distribution = torch.distributions.Normal(mean.repeat(sample_shape), var.repeat(sample_shape))
     return normal_distribution.rsample()
 
+def loss_prob(probabilities, test_labels, device):
+    # Convert true class indices to one-hot encoding
+    true_classes_one_hot = F.one_hot(test_labels, num_classes=probabilities.size(1)).float()
+    
+    # Compute the log of probabilities
+    log_probabilities = torch.log(probabilities)
 
+    loss = -torch.sum(true_classes_one_hot * log_probabilities) / test_labels.size(0)
+    
+    return loss
+    
 def loss(test_logits_sample, test_labels, device):
     """
     Compute the classification loss.
     """
+    # test_logits_sample is a tensor of size sample_count x class
+    # test_labels is a tensor of size sample_count
+    # print(test_labels)
+    # print(test_logits_sample)
     size = test_logits_sample.size()
+
     sample_count = size[0]  # scalar for the loop counter
     num_samples = torch.tensor([sample_count], dtype=torch.float, device=device, requires_grad=False)
 
+    # log_py is a tensor of size sample_count x class, where each entry is the log probability of the corresponding
     log_py = torch.empty(size=(size[0], size[1]), dtype=torch.float, device=device)
+    # print(log_py)
     for sample in range(sample_count):
         log_py[sample] = -F.cross_entropy(test_logits_sample[sample], test_labels, reduction='none')
+    
     score = torch.logsumexp(log_py, dim=0) - torch.log(num_samples)
+    # print(score)
     return -torch.sum(score, dim=0)
 
 
@@ -156,6 +175,23 @@ def aggregate_accuracy(test_logits_sample, test_labels):
     """
     averaged_predictions = torch.logsumexp(test_logits_sample, dim=0)
     return torch.mean(torch.eq(test_labels, torch.argmax(averaged_predictions, dim=-1)).float())
+
+def aggregate_prob_accuracy(probabilities, test_labels):
+    """
+    Compute classification accuracy using probabilities after softmax.
+    
+    probabilities: tensor of size sample_count x class containing probabilities after softmax
+    test_labels: tensor of size sample_count containing the true class indices
+    """
+    # Calculate the predicted class labels by finding the index of the max probability
+    predictions = torch.argmax(probabilities, dim=-1)
+    
+    # Compare predictions with the true labels and calculate accuracy
+    correct_predictions = torch.eq(test_labels, predictions).float()
+    accuracy = torch.mean(correct_predictions)
+    
+    return accuracy
+
 
 def task_confusion(test_logits, test_labels, real_test_labels, batch_class_list):
     preds = torch.argmax(torch.logsumexp(test_logits, dim=0), dim=-1)

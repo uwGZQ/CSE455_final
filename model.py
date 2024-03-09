@@ -865,4 +865,3 @@ if __name__ == "__main__":
     print("Loss L_f_r", out['L_f_r'])
     print("Loss L_r_f", out['L_r_f'])
     # Outputs are: the loss L_f-r, the loss L_r-f, the flow posterior P_f, the rgb posterior P_r, and the posterior distribution for each query sample
-

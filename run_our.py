@@ -3,8 +3,8 @@ import numpy as np
 import argparse
 import os
 import pickle
-from utils import print_and_log, get_log_files, TestAccuracies, loss, aggregate_accuracy, verify_checkpoint_dir, task_confusion
-from model import CNN_STRM
+from utils import print_and_log, get_log_files, TestAccuracies, loss, aggregate_accuracy, verify_checkpoint_dir, task_confusion, loss_prob, aggregate_prob_accuracy
+from model import CNN_STRM, AMFAR
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Quiet TensorFlow warnings
 import tensorflow as tf
 
@@ -69,8 +69,8 @@ class Learner:
         self.vd = video_reader.VideoDataset(self.args)
         self.video_loader = torch.utils.data.DataLoader(self.vd, batch_size=1, num_workers=self.args.num_workers)
         print("Data loaded")
-        self.loss = loss
-        self.accuracy_fn = aggregate_accuracy
+        self.loss = loss_prob
+        self.accuracy_fn = aggregate_prob_accuracy
         
         if self.args.opt == "adam":
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
@@ -86,7 +86,8 @@ class Learner:
         self.optimizer.zero_grad()
 
     def init_model(self):
-        model = CNN_STRM(self.args)
+        # model = CNN_STRM(self.args)
+        model = AMFAR(self.args)
         model = model.to(self.device) 
         if self.args.num_gpus > 1:
             model.distribute_model()
@@ -155,6 +156,7 @@ class Learner:
             args.img_size = 224
         if args.method == "resnet50":
             args.trans_linear_in_dim = 2048
+            args_trans_linear_in_dim_of = 1024
         else:
             args.trans_linear_in_dim = 512
         
@@ -240,36 +242,53 @@ class Learner:
                 torch.save(self.model.state_dict(), self.checkpoint_path_final)
 
         self.logfile.close()
+
     def train_task(self, task_dict):
+        # it should be 
         # task_dict_shape torch.Size([200, 3, 224, 224]) torch.Size([25]) torch.Size([160, 3, 224, 224]) torch.Size([1, 20]) torch.Size([1, 20]) torch.Size([1, 5])
-        context_images, target_images, context_labels, target_labels, real_target_labels, batch_class_list = self.prepare_task(task_dict)
-        print("context_images_shape", context_images.shape, context_labels.shape, "target_images_shape", target_images.shape, target_labels.shape, real_target_labels.shape, batch_class_list.shape)
+        context_images, target_images, context_labels, target_labels, context_flow_images, target_flow_images, real_target_labels, batch_class_list = self.prepare_task(task_dict)
+
         context_images = context_images.to(self.device)
         context_labels = context_labels.to(self.device)
         target_images = target_images.to(self.device)
 
-        model_dict = self.model(context_images, context_labels, target_images)
-        target_logits = model_dict['logits'].to(self.device)
+        model_input = {"context_rgb_features": context_images, "context_flow_features": context_flow_images, "context_labels": context_labels, "target_rgb_features": target_images, "target_flow_features": target_flow_images}
+        model_dict = self.model(model_input)
+        #     print("shape of out", out['L_f_r'].shape, out['L_r_f'].shape, out['P_f'].shape, out['P_r'].shape, out['posterior'].shape)
+
+        Loss_fr = model_dict['L_f_r'].to(self.device)
+        Loss_rf = model_dict['L_r_f'].to(self.device)
+        Prob_f = model_dict['P_f'].to(self.device)
+        Prob_r = model_dict['P_r'].to(self.device)
+        Prob = model_dict['posterior'].to(self.device)
+
+        # target_logits = model_dict['logits'].to(self.device)
 
         # Target logits after applying query-distance-based similarity metric on patch-level enriched features
-        target_logits_post_pat = model_dict['logits_post_pat'].to(self.device)
+        # target_logits_post_pat = model_dict['logits_post_pat'].to(self.device)
 
         target_labels = target_labels.to(self.device)
+        target_prob_rgb = Prob_r.to(self.device)
+        target_prob_flow = Prob_f.to(self.device)
+        task_loss_r = self.loss(target_prob_rgb, target_labels, self.device) / self.args.tasks_per_batch
+        task_loss_f = self.loss(target_prob_flow, target_labels, self.device) / self.args.tasks_per_batch
 
-        task_loss = self.loss(target_logits, target_labels, self.device) / self.args.tasks_per_batch
-        task_loss_post_pat = self.loss(target_logits_post_pat, target_labels, self.device) / self.args.tasks_per_batch
+        # task_loss_post_pat = self.loss(target_logits_post_pat, target_labels, self.device) / self.args.tasks_per_batch
 
         # Joint loss
-        task_loss = task_loss + 0.1*task_loss_post_pat
+        task_loss_r = task_loss_r + Loss_fr
+        task_loss_f = task_loss_f + Loss_rf
+
 
         # Add the logits before computing the accuracy
-        target_logits = target_logits + 0.1*target_logits_post_pat
+        # target_logits = target_logits + 0.1*target_logits_post_pat
 
-        task_accuracy = self.accuracy_fn(target_logits, target_labels)
+        task_accuracy = self.accuracy_fn(Prob, target_labels)
 
-        task_loss.backward(retain_graph=False)
+        task_loss_r.backward(retain_graph=False)
+        task_loss_f.backward(retain_graph=False)
 
-        return task_loss, task_accuracy
+        return task_loss_r, task_loss_f, task_accuracy
 
     def test(self, session, num_episode):
         self.model.eval()
@@ -286,27 +305,60 @@ class Learner:
                         break
                     iteration += 1
 
-                    context_images, target_images, context_labels, target_labels, real_target_labels, batch_class_list = self.prepare_task(task_dict)
-                    model_dict = self.model(context_images, context_labels, target_images)
-                    target_logits = model_dict['logits'].to(self.device)
+                    context_images, target_images, context_labels, target_labels, context_flow_images, target_flow_images, real_target_labels, batch_class_list = self.prepare_task(task_dict)
+                    # model_dict = self.model(context_images, context_labels, target_images)
+                    # target_logits = model_dict['logits'].to(self.device)
 
-                    # Target logits after applying query-distance-based similarity metric on patch-level enriched features   
-                    target_logits_post_pat = model_dict['logits_post_pat'].to(self.device)
+                    # # Target logits after applying query-distance-based similarity metric on patch-level enriched features   
+                    # target_logits_post_pat = model_dict['logits_post_pat'].to(self.device)
 
-                    target_labels = target_labels.to(self.device)
+                    # target_labels = target_labels.to(self.device)
 
-                    # Add the logits before computing the accuracy
-                    target_logits = target_logits + 0.1*target_logits_post_pat
+                    # # Add the logits before computing the accuracy
+                    # target_logits = target_logits + 0.1*target_logits_post_pat
 
-                    accuracy = self.accuracy_fn(target_logits, target_labels)
+                    # accuracy = self.accuracy_fn(target_logits, target_labels)
                     
-                    loss = self.loss(target_logits, target_labels, self.device)/self.args.num_test_tasks
+                    # loss = self.loss(target_logits, target_labels, self.device)/self.args.num_test_tasks
                    
-                    # Loss using the new distance metric after  patch-level enrichment
-                    loss_post_pat = self.loss(target_logits_post_pat, target_labels, self.device)/self.args.num_test_tasks
+                    # # Loss using the new distance metric after  patch-level enrichment
+                    # loss_post_pat = self.loss(target_logits_post_pat, target_labels, self.device)/self.args.num_test_tasks
 
                     # Joint loss
-                    loss = loss + 0.1*loss_post_pat
+                    # loss = loss + 0.1*loss_post_pat
+                    model_input = {"context_rgb_features": context_images, "context_flow_features": context_flow_images, "context_labels": context_labels, "target_rgb_features": target_images, "target_flow_features": target_flow_images}
+                    model_dict = self.model(model_input)
+                    #     print("shape of out", out['L_f_r'].shape, out['L_r_f'].shape, out['P_f'].shape, out['P_r'].shape, out['posterior'].shape)
+
+                    Loss_fr = model_dict['L_f_r'].to(self.device)
+                    Loss_rf = model_dict['L_r_f'].to(self.device)
+                    Prob_f = model_dict['P_f'].to(self.device)
+                    Prob_r = model_dict['P_r'].to(self.device)
+                    Prob = model_dict['posterior'].to(self.device)
+
+        # target_logits = model_dict['logits'].to(self.device)
+
+        # Target logits after applying query-distance-based similarity metric on patch-level enriched features
+        # target_logits_post_pat = model_dict['logits_post_pat'].to(self.device)
+
+                    target_labels = target_labels.to(self.device)
+                    target_prob_rgb = Prob_r.to(self.device)
+                    target_prob_flow = Prob_f.to(self.device)
+                    task_loss_r = self.loss(target_prob_rgb, target_labels, self.device) / self.args.tasks_per_batch
+                    task_loss_f = self.loss(target_prob_flow, target_labels, self.device) / self.args.tasks_per_batch
+
+        # task_loss_post_pat = self.loss(target_logits_post_pat, target_labels, self.device) / self.args.tasks_per_batch
+
+        # Joint loss
+                    task_loss_r = task_loss_r + Loss_fr
+                    task_loss_f = task_loss_f + Loss_rf
+
+
+        # Add the logits before computing the accuracy
+        # target_logits = target_logits + 0.1*target_logits_post_pat
+
+                    accuracy = self.accuracy_fn(Prob, target_labels)
+
 
                     eval_logger.info("For Task: {0}, the testing loss is {1} and Testing Accuracy is {2}".format(iteration + 1, loss.item(),
                             accuracy.item()))
