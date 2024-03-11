@@ -9,6 +9,7 @@ from itertools import combinations
 from torch.autograd import Variable
 
 import torchvision.models as models
+from pytorch_i3d import InceptionI3d
 
 NUM_SAMPLES=1
 
@@ -545,8 +546,7 @@ class CNN_STRM(nn.Module):
 
 
 
-class RGB_Strm_Backbone(nn.Module):
-    
+class RGB_Strm_Backbone(nn.Module):   
     '''
     Input: 
     support_set, 和query set
@@ -578,7 +578,7 @@ class RGB_Strm_Backbone(nn.Module):
 
                    
     def forward(self, context_feature,context_labels, target_feature):
-            
+         
         context_features = self.resnet(context_feature) # 200 x 2048 x 7 x 7
         target_features = self.resnet(target_feature) # 160 x 2048 x 7 x 7
             # Decrease to 4 x 4 = 16 patches
@@ -629,9 +629,6 @@ class RGB_Strm_Backbone(nn.Module):
         # import random
         # random.shuffle(context_group)
         # context_features, context_labels = zip(*context_group)
-
-# python run.py -c checkpoint_dir_ucf/ --query_per_class 4 --shot 5 --way 5 --trans_linear_out_dim 1152 --test_iters 10000 --dataset ucf --split 3 -lr 0.0001 --img_size 224 --scratch new --num_gpus 0 --method resnet50 --save_freq 10000 --print_freq 1 --training_iterations 20010 --temp_set 2
-
         return {'context_features': context_features, 
                     'target_features': target_features}
     
@@ -646,13 +643,50 @@ class RGB_Strm_Backbone(nn.Module):
             self.attn_pat = torch.nn.DataParallel(self.attn_pat, device_ids=list(range(self.args.num_gpus)))
             self.fr_enrich = torch.nn.DataParallel(self.fr_enrich, device_ids=list(range(self.args.num_gpus)))
 
-class Backbone(nn.Module):
+class Flow_i3d_backbone(nn.Module):
     def __init__(self, args):
-        pass
-        
-    def forward(self, x):
-        pass
+        super(Flow_i3d_backbone, self).__init__()
+        self.args = args
+        self.i3d = InceptionI3d(400, in_channels=2)
+        self.i3d.replace_logits(157)
+        self.i3d.load_state_dict(torch.load('model/flow_charades.pt'))
 
+        
+    def forward(self, context_feature, context_labels, target_feature):
+        # batch, lengh, channel, height, width -> batch, channel, length, height, width
+        print("context_feature", context_feature.shape) # 25 x 7 x 2 x 224 x 224
+        # for input size > 8: 7 -> 9
+        context_feature = torch.cat((context_feature[:, 0:1, :, :, :], context_feature, context_feature[:, 6:7, :, :, :]), 1)
+        target_feature = torch.cat((target_feature[:, 0:1, :, :, :], target_feature, target_feature[:, 6:7, :, :, :]), 1)
+        context_feature = context_feature.permute(0, 2, 1, 3, 4)
+        target_feature = target_feature.permute(0, 2, 1, 3, 4)
+        context_features = self.i3d.extract_features(context_feature)
+        context_features = context_features.squeeze()
+        target_features = self.i3d.extract_features(target_feature)
+        target_features = target_features.squeeze()
+        # 我要把每个class对应的vieo的特征做平均，作为class的特征
+        # todo, based on context_labels的值，把context_features分成5类，然后求平均
+        context_group = zip(context_features, context_labels)
+        context_group = list(context_group)
+        context_group = sorted(context_group, key=lambda x: x[1])
+        context_features, context_labels = zip(*context_group)
+        context_features = torch.stack(context_features)
+        context_labels = torch.stack(context_labels)
+        context_features = context_feature.reshape(self.args.way, -1, 1024)
+        context_features = context_features.mean(dim=1)
+
+
+        return {'context_features': context_features, 
+                    'target_features': target_features}
+
+    def distribute_model(self):
+        """
+        Distributes the CNNs over multiple GPUs.
+        :return: Nothing
+        """
+        if self.args.num_gpus > 1:
+            self.i3d = torch.nn.DataParallel(self.i3d, device_ids=list(range(self.args.num_gpus)))
+        
 class AAS(nn.Module):
     def __init__(self, args):
         super(AAS, self).__init__()
@@ -668,6 +702,12 @@ class AAS(nn.Module):
         context_flow_features = x['context_flow_features']
         target_rgb_features = x['target_rgb_features']
         target_flow_features = x['target_flow_features']
+        # print("shapes")
+        # print(context_rgb_features)
+        # print(context_flow_features.shape)
+        # print(target_rgb_features.shape)
+        # print(target_flow_features.shape)
+        
         p_r, c_r, h_r = self.rgb_Posterior(context_rgb_features, target_rgb_features)
         p_f, c_f, h_f = self.flow_Posterior(context_flow_features, target_flow_features)
         # For each query sample, if a specific modality achieves high absolute certainty and relative certainty, this modality is re- liable enough to express discriminative action characteris- tic in the few-shot task. Conversely, if the certainty is low, the modality is probably unreliable to identify actions in the few-shot task. To facilitate the exploring of cross-modal complementarity, we select query samples with large differ- ences in the reliability of two modalities and organize them into two group
@@ -716,14 +756,11 @@ class ModalitySpecificPosterior(nn.Module):
         # We define the absolute certainty c_m^i as the maximum element of the modality-specific posterior distribution:
         c = torch.max(posterior, dim=1)[0]
 
-        print("c", c)
-        print("posterior", posterior)
+        # print("c", c)
+        # print("posterior", posterior)
         # we define the relative certainty h_m^i as the nega- tive self-entropy of the modality-specific posterior distribu- tion:
         h = -torch.sum(posterior * torch.log(posterior), dim=1)
         return posterior, c, h
-
-
-
 
 class AMD(nn.Module):
     def __init__(self, args):
@@ -744,25 +781,24 @@ class AMD(nn.Module):
             L_f_r += c_f[i] * self.KLDivLoss(p_r[i], p_f[i])
         for i in range(len(Q_r)):
             L_r_f += c_r[i] * self.KLDivLoss(p_f[i], p_r[i])
-        print("pf shape", p_f.shape)
-        print("pr shape", p_r.shape)
-        print("cr shape", c_r.shape)
-        print("cf shape", c_f.shape)
-        print("Q_f shape", len(Q_f))
-        print("Q_r shape", len(Q_r))
-        print("c_f", c_f)
-        print("c_r", c_r)
+        # print("pf shape", p_f.shape)
+        # print("pr shape", p_r.shape)
+        # print("cr shape", c_r.shape)
+        # print("cf shape", c_f.shape)
+        # print("Q_f shape", len(Q_f))
+        # print("Q_r shape", len(Q_r))
+        # print("c_f", c_f)
+        # print("c_r", c_r)
 
         L_f_r = L_f_r / torch.sum(c_f)
         L_r_f = L_r_f / torch.sum(c_r)
-        print("L_f_r", L_f_r)
-        print("L_r_f", L_r_f)
+        # print("L_f_r", L_f_r)
+        # print("L_r_f", L_r_f)
         # import sys
         # sys.exit()
 
         return L_f_r, L_r_f
         
-
 class AMI(nn.Module):
     def __init__(self, args):
         super(AMI, self).__init__()
@@ -779,45 +815,54 @@ class AMI(nn.Module):
         num_queries = target_rgb_features.size(0)
         num_classes = context_rgb_features.size(0)
         posterior = torch.zeros(num_queries, num_classes)
-        print("shapes")
-        print("target_rgb_features", target_rgb_features.shape)
-        print("context_rgb_features", context_rgb_features.shape)
-        print("target_flow_features", target_flow_features.shape)
-        print("context_flow_features", context_flow_features.shape)
-        print("w_r", w_r.shape)
-        print("w_f", w_f.shape)
+
         for i in range(num_queries):
             for k in range(num_classes):
                 distance_rgb = torch.nn.PairwiseDistance(p=2)(target_rgb_features[i], context_rgb_features[k])
                 distance_flow = torch.nn.PairwiseDistance(p=2)(target_flow_features[i], context_flow_features[k])
-                print("distance_rgb", distance_rgb)
-                print("distance_flow", distance_flow)
-                print("i",i)
-                print("w_r[i]", w_r[i])
-                print("w_f[i]", w_f[i])
-
-                print("torch.exp(-distance_rgb)", torch.exp(-distance_rgb))
-                print("torch.exp(-distance_flow)", torch.exp(-distance_flow))
                 posterior[i, k] = w_r[i] * torch.exp(-distance_rgb) + w_f[i] * torch.exp(-distance_flow)
         posterior = posterior / torch.sum(posterior, dim=1, keepdim=True)
         return posterior
-
 
 class AMFAR(nn.Module):
     def __init__(self, args):
         super(AMFAR, self).__init__()
         self.args = args
+        self.rgb_backbone = RGB_Strm_Backbone(args)
+        self.flow_backbone = Flow_i3d_backbone(args)
         self.AAS = AAS(args)
         self.AMD = AMD(args)
         self.AMI = AMI(args)
     def forward(self, x):
-        output_AAS = self.AAS(x)
+        #  model_input = {"context_rgb_features": context_images, "context_flow_features": context_flow_images, "context_labels": context_labels, "target_rgb_features": target_images, "target_flow_features": target_flow_images}
+
+        # print("shapes", x['context_rgb_features'].shape, x['context_flow_features'].shape, x['target_rgb_features'].shape, x['target_flow_features'].shape)
+
+        context_rgb_features = x['context_rgb_features']
+        context_flow_features = x['context_flow_features']
+        target_rgb_features = x['target_rgb_features']
+        target_flow_features = x['target_flow_features']
+        context_labels = x['context_labels']
+        Features_rgb = self.rgb_backbone(context_rgb_features, context_labels, target_rgb_features)
+        context_rgb_features, target_rgb_features = Features_rgb['context_features'], Features_rgb['target_features']
+        Features_flow = self.flow_backbone(context_flow_features, context_labels, target_flow_features)
+        context_flow_features, target_flow_features = Features_flow['context_features'], Features_flow['target_features']
+        x_features = {"context_rgb_features": context_rgb_features, "context_flow_features": context_flow_features, "target_rgb_features": target_rgb_features, "target_flow_features": target_flow_features}
+
+        output_AAS = self.AAS(x_features)
         P_r = output_AAS['p_r']
         P_f = output_AAS['p_f']
+        print("Shapes------", P_r.shape, P_f.shape, output_AAS['c_r'].shape, output_AAS['c_f'].shape, context_rgb_features.shape, context_flow_features.shape, target_rgb_features.shape, target_flow_features.shape)
         L_f_r, L_r_f = self.AMD(output_AAS)
-        posterior = self.AMI(x,output_AAS)
+        posterior = self.AMI(x_features,output_AAS)
         return {"L_f_r": L_f_r, "L_r_f": L_r_f, "P_f": P_f, "P_r": P_r, "posterior": posterior}
-        # return L_f_r, L_r_f, P_f, P_r, posterior
+    def distribute_model(self):
+        if self.args.num_gpus > 1:
+            self.rgb_backbone.distribute_model()
+            self.flow_backbone.distribute_model()
+            self.AAS = torch.nn.DataParallel(self.AAS, device_ids=list(range(self.args.num_gpus)))
+            self.AMD = torch.nn.DataParallel(self.AMD, device_ids=list(range(self.args.num_gpus)))
+            self.AMI = torch.nn.DataParallel(self.AMI, device_ids=list(range(self.args.num_gpus)))
 
 
 
@@ -852,15 +897,56 @@ if __name__ == "__main__":
     # example use for ModalitySpecificPosterior
     args = ArgsObject()
     model = AMFAR(args)
+    print(model)
+    # check which parameters are being trained
+    print("Parameters to train:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name)
+    print("model part 1 parameters")
+    for name, param in model.rgb_backbone.named_parameters():
+        if param.requires_grad:
+            print(name)
+    print("model part 2 parameters")
+    for name, param in model.flow_backbone.named_parameters():
+        if param.requires_grad:
+            print(name)
+    print("model part 3 parameters")
+    for name, param in model.AAS.named_parameters():
+        if param.requires_grad:
+            print(name)
+
+    print("Gradient graph")
     context_rgb_features = torch.rand(5, 2048)
     context_flow_features = torch.rand(5, 1024)
+    context_labels = torch.tensor([0,1,2,3,4])
     target_rgb_features = torch.rand(20, 2048)
     target_flow_features = torch.rand(20, 1024)
     print("context_rgb_features", context_rgb_features)
     print("context_flow_features", context_flow_features)
     print("target_rgb_features", target_rgb_features)
     print("target_flow_features", target_flow_features)
-    out = model({"context_rgb_features": context_rgb_features, "context_flow_features": context_flow_features, "target_rgb_features": target_rgb_features, "target_flow_features": target_flow_features})
+    out = model({"context_rgb_features": context_rgb_features, "context_flow_features": context_flow_features, "target_rgb_features": target_rgb_features, "target_flow_features": target_flow_features, "context_labels": context_labels})
+    print("shape of out", out['L_f_r'].shape, out['L_r_f'].shape, out['P_f'].shape, out['P_r'].shape, out['posterior'].shape)
+    print("Loss L_f_r", out['L_f_r'])
+    print("Loss L_r_f", out['L_r_f'])
+    # Outputs are: the loss L_f-r, the loss L_r-f, the flow posterior P_f, the rgb posterior P_r, and the posterior distribution for each query sample
+    # gradient check
+    out['L_f_r'].backward()
+    out['L_r_f'].backward()
+
+    import sys
+    sys.exit()
+    context_rgb_features = torch.rand(5, 2048)
+    context_flow_features = torch.rand(5, 1024)
+    context_labels = torch.tensor([0,1,2,3,4])
+    target_rgb_features = torch.rand(20, 2048)
+    target_flow_features = torch.rand(20, 1024)
+    print("context_rgb_features", context_rgb_features)
+    print("context_flow_features", context_flow_features)
+    print("target_rgb_features", target_rgb_features)
+    print("target_flow_features", target_flow_features)
+    out = model({"context_rgb_features": context_rgb_features, "context_flow_features": context_flow_features, "target_rgb_features": target_rgb_features, "target_flow_features": target_flow_features, "context_labels": context_labels})
     print("shape of out", out['L_f_r'].shape, out['L_r_f'].shape, out['P_f'].shape, out['P_r'].shape, out['posterior'].shape)
     print("Loss L_f_r", out['L_f_r'])
     print("Loss L_r_f", out['L_r_f'])

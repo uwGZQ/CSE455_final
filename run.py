@@ -11,7 +11,7 @@ import tensorflow as tf
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
-import video_reader
+import video_reader_cpp
 import random 
 
 import logging
@@ -62,11 +62,12 @@ class Learner:
 
         
         gpu_device = 'cuda'
-        self.device = torch.device(gpu_device if torch.cuda.is_available() else 'cpu')
+        # self.device = torch.device(gpu_device if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cpu')
         self.model = self.init_model()
         self.train_set, self.validation_set, self.test_set = self.init_data()
 
-        self.vd = video_reader.VideoDataset(self.args)
+        self.vd = video_reader_cpp.VideoDataset(self.args)
         self.video_loader = torch.utils.data.DataLoader(self.vd, batch_size=1, num_workers=self.args.num_workers)
         print("Data loaded")
         self.loss = loss
@@ -145,7 +146,7 @@ class Learner:
             args.num_workers = 3
             args.scratch = "/work/tp8961"
         elif args.scratch == "new":
-            args.scratch = "/Users/roy/Desktop/CV_Final_support/strm"
+            args.scratch = "/data2/CSE455_final"
         
         if args.checkpoint_dir == None:
             print("need to specify a checkpoint dir")
@@ -165,11 +166,11 @@ class Learner:
             args.traintestlist = os.path.join(args.scratch, "video_datasets/splits/kineticsTrainTestlist")
             args.path = os.path.join(args.scratch, "video_datasets/data/kinetics_256q5_1.zip")
         elif args.dataset == "ucf":
-            args.traintestlist = os.path.join("/Users/roy/Desktop/CSE455_final", "video_datasets/splits/ucf_ARN/")
-            args.path = os.path.join(args.scratch, "video_datasets/data/ucf_256x256q5_l8")
+            args.traintestlist = os.path.join(args.scratch, "video_datasets/splits/ucf_ARN/")
+            args.path = os.path.join("/data3/cse455/ucf_256x256q5_rgb_flow")
         elif args.dataset == "hmdb":
-            args.traintestlist = os.path.join(args.scratch, "video_datasets/splits/hmdb51TrainTestlist")
-            args.path = os.path.join(args.scratch, "video_datasets/data/hmdb51_256q5.zip")
+            args.traintestlist = os.path.join(args.scratch, "video_datasets/splits/hmdb")
+            args.path = os.path.join("/data3/cse455/hmdb51_org_256x256q5_rgb_flow")
             # args.path = os.path.join(args.scratch, "video_datasets/data/hmdb51_jpegs_256.zip")
 
         with open("args.pkl", "wb") as f:

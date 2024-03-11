@@ -18,14 +18,10 @@ class Split():
     def __init__(self):
         self.gt_a_list = [] # ground truth action labels
         self.videos = []    # list of lists of frame paths
-        self.videos_flows_X = [] # list of lists of flow_x paths for optical flow
-        self.videos_flows_Y = [] # list of lists of flow_y paths for optical flow
     
-    def add_vid(self, paths_x, paths_y, paths, gt_a):
+    def add_vid(self, paths, gt_a):
         # print("paths: ", paths)
         # print("gt_a: ", gt_a)
-        self.videos_flows_X.append(paths_x) # list of frame paths
-        self.videos_flows_Y.append(paths_y) # list of frame paths
         self.videos.append(paths)   # list of frame paths
         self.gt_a_list.append(gt_a) # ground truth action label
 
@@ -39,9 +35,9 @@ class Split():
                 match_idxs.append(i) # add index to list if the label matches
         # if the index is specified, return the video at that index
         if idx != -1:
-            return self.videos[match_idxs[idx]], self.videos_flows_X[match_idxs[idx]], self.videos_flows_Y[match_idxs[idx]], match_idxs[idx]
+            return self.videos[match_idxs[idx]], match_idxs[idx]
         random_idx = np.random.choice(match_idxs)
-        return self.videos[random_idx], self.videos_flows_X[random_idx], self.videos_flows_Y[random_idx], random_idx
+        return self.videos[random_idx], random_idx
 
     def get_num_videos_for_class(self, label):
         # print("label: ", label)
@@ -179,7 +175,7 @@ class VideoDataset(torch.utils.data.Dataset):
             class_folders = os.listdir(self.data_dir)
             # print("class_folders: ", class_folders)
             class_folders.sort()
-            class_folders = [c for c in class_folders if c[0] != '.']
+            class_folders = [c for c in class_folders if c[0] != "."]
             self.class_folders = class_folders
             for class_folder in class_folders:
                 video_folders = os.listdir(os.path.join(self.data_dir, class_folder))
@@ -191,37 +187,27 @@ class VideoDataset(torch.utils.data.Dataset):
                     video_folders = video_folders[0:1]
                 for video_folder in video_folders:
                     c = self.get_train_or_test_db(video_folder.lower())
-                    # print("c: ", c)
-                    # print("video_folder: ", video_folder)
+                    print("c: ", c)
+                    print("video_folder: ", video_folder)
 
 
                     if c == None:
                         continue
                     imgs = os.listdir(os.path.join(self.data_dir, class_folder, video_folder,"img"))
-                    flow_x = os.listdir(os.path.join(self.data_dir, class_folder, video_folder,"flow_x"))
-                    flow_y = os.listdir(os.path.join(self.data_dir, class_folder, video_folder,"flow_y"))
                     # print("imgs: ", imgs)
                     if len(imgs) < self.seq_len:
                         continue            
                     imgs.sort()
-                    paths = [os.path.join(self.data_dir, class_folder, video_folder, "img",img) for img in imgs]
-                    flow_x.sort()
-                    flow_y.sort()
-                    flow_x_paths = [os.path.join(self.data_dir, class_folder, video_folder, "flow_x",img) for img in flow_x]
-                    flow_y_paths = [os.path.join(self.data_dir, class_folder, video_folder, "flow_y",img) for img in flow_y]
+                    paths = [os.path.join(self.data_dir, class_folder, video_folder, "img" ,img) for img in imgs]
                     paths.sort()
-                    flow_x_paths.sort()
-                    flow_y_paths.sort()
-
                     class_id =  class_folders.index(class_folder)
-                    c.add_vid(flow_x_paths, flow_y_paths, paths, class_id)
+                    c.add_vid(paths, class_id)
         print("loaded {}".format(self.data_dir))
         print("train: {}, test: {}".format(len(self.train_split), len(self.test_split)))
 
     """ return the current split being used """
     # whether the video should be added to the training database or the testing database based on the name of the video folder.
     def get_train_or_test_db(self, split=None):
-
         # print("split: ", split)
         if split is None:
             get_train_split = self.train
@@ -230,14 +216,10 @@ class VideoDataset(torch.utils.data.Dataset):
             if split in self.train_test_lists["train"]:
                 # print("split: ", split)
                 get_train_split = True
-
             elif split in self.train_test_lists["test"]:
                 get_train_split = False
-
             else:
-
                 return None
-            
         if get_train_split:
             return self.train_split
         else:
@@ -264,7 +246,9 @@ class VideoDataset(torch.utils.data.Dataset):
                 # -> os.path.splitext(os.path.split(x)[1])[0] : -VtLx-mcPds_000012_000022
                 data = [os.path.splitext(os.path.split(x)[1])[0] for x in data]
                 
-            
+#                 if "kinetics" in self.args.path:
+#                     data = [x[0:11] for x in data]
+                
                 selected_files.extend(data)
             lists[name] = selected_files
         self.train_test_lists = lists
@@ -294,24 +278,14 @@ class VideoDataset(torch.utils.data.Dataset):
             with Image.open(path) as i:
                 i.load()
                 return i
-    def read_single_image_flow(self, path):
-        """read npy"""
-        with open(path, 'rb') as f:
-            i = np.load(f)
-            # center crop 224 x 224
-            i = i[8:232, 8:232]
-            return i
-        
     
     """Gets a single video sequence. Handles sampling if there are more frames than specified. """
     def get_seq(self, label, idx=-1):
         c = self.get_train_or_test_db()
-        paths, paths_flow_x, paths_flow_y, vid_id = c.get_rand_vid(label, idx) 
+        paths, vid_id = c.get_rand_vid(label, idx) 
         n_frames = len(paths)
-        n_frames_flow = len(paths_flow_x)
         if n_frames == self.args.seq_len: # default case: 8
-            idxs = [int(f) for f in range(n_frames)] # [0, 1, 2, 3, 4, 5, 6, 7]
-            idxs_flow = [int(f) for f in range(n_frames_flow)] # [0, 1, 2, 3, 4, 5, 6]
+            idxs = [int(f) for f in range(n_frames)]
         else:
             if self.train:
                 excess_frames = n_frames - self.seq_len
@@ -334,33 +308,20 @@ class VideoDataset(torch.utils.data.Dataset):
     
             idx_f = np.linspace(start, end, num=self.seq_len)
             idxs = [int(f) for f in idx_f]
-            # idxs_flow = [int(f) for f in range(n_frames_flow)] # 取前7个
-            idxs_flow = [int(f) for f in range(n_frames_flow) if f < self.seq_len] # 取前7个
-
+            
             if self.seq_len == 1:
                 idxs = [random.randint(start, end-1)]
 
         imgs = [self.read_single_image(paths[i]) for i in idxs]
-        imgs_flow_x = [self.read_single_image_flow(paths_flow_x[i]) for i in idxs_flow]
-        imgs_flow_y = [self.read_single_image_flow(paths_flow_y[i]) for i in idxs_flow]
         if (self.transform is not None):
             if self.train:
                 transform = self.transform["train"]
             else:
                 transform = self.transform["test"]
-            # img size is 224
+            
             imgs = [self.tensor_transform(v) for v in transform(imgs)]
-            # imgs shape: [8, 3, 224, 224]
             imgs = torch.stack(imgs)
-            imgs_flow_x = [self.tensor_transform(v) for v in imgs_flow_x]
-            imgs_flow_x = torch.stack(imgs_flow_x)
-            imgs_flow_y = [self.tensor_transform(v) for v in imgs_flow_y]
-            imgs_flow_y = torch.stack(imgs_flow_y)
-            # combine two flow images to a two-channel image
-            imgs_flow = torch.cat((imgs_flow_x, imgs_flow_y), 1)
-
-
-        return imgs, imgs_flow, vid_id
+        return imgs, vid_id
 
 
     """returns dict of support and target images and labels"""
@@ -381,10 +342,8 @@ class VideoDataset(torch.utils.data.Dataset):
             n_queries = self.args.query_per_class_test # default: 1
 
         support_set = []
-        support_flow_set = []
         support_labels = []
         target_set = []
-        target_flow_set = []
         target_labels = []
         real_support_labels = []
         real_target_labels = []
@@ -396,34 +355,37 @@ class VideoDataset(torch.utils.data.Dataset):
             # K shot + N query
             idxs = random.sample([i for i in range(n_total)], self.args.shot + n_queries)
             for idx in idxs[0:self.args.shot]:
-                vid, flow, vid_id = self.get_seq(bc, idx)
+                vid, vid_id = self.get_seq(bc, idx)
                 support_set.append(vid)
-                support_flow_set.append(flow)
                 support_labels.append(bl)
             for idx in idxs[self.args.shot:]:
-                vid, flow, vid_id = self.get_seq(bc, idx)
+                vid, vid_id = self.get_seq(bc, idx)
                 target_set.append(vid)
-                target_flow_set.append(flow)
                 target_labels.append(bl)
                 real_target_labels.append(bc)
         
-        s = list(zip(support_set, support_flow_set,support_labels))
+        s = list(zip(support_set, support_labels))
         random.shuffle(s)
-        support_set, support_flow_set, support_labels = zip(*s)
+        support_set, support_labels = zip(*s)
         
-        t = list(zip(target_set, target_flow_set, target_labels, real_target_labels))
+        t = list(zip(target_set, target_labels, real_target_labels))
         random.shuffle(t)
-        target_set, target_flow_set, target_labels, real_target_labels = zip(*t)
+        target_set, target_labels, real_target_labels = zip(*t)
+        print("support_set: ", support_set[0].shape)
         support_set = torch.cat(support_set)
+        print("support_set: ", support_set.shape)
         target_set = torch.cat(target_set)
-        
-        support_flow_set = torch.stack(support_flow_set,dim=0)
-        target_flow_set = torch.stack(target_flow_set, dim = 0)
         support_labels = torch.FloatTensor(support_labels)
         target_labels = torch.FloatTensor(target_labels)
         real_target_labels = torch.FloatTensor(real_target_labels)
         batch_classes = torch.FloatTensor(batch_classes) 
+        # print("support_set: ", support_set)
+        # print("support_labels: ", support_labels)
+        # print("target_set: ", target_set)
+        # print("target_labels: ", target_labels)
+        # print("real_target_labels: ", real_target_labels)
+        
 
-        return {"support_set":support_set, "support_flow_set": support_flow_set,"support_labels":support_labels, "target_set":target_set,   "target_flow_set": target_flow_set,"target_labels":target_labels, "real_target_labels":real_target_labels, "batch_class_list": batch_classes}
- 
+
+        return {"support_set":support_set, "support_labels":support_labels, "target_set":target_set, "target_labels":target_labels, "real_target_labels":real_target_labels, "batch_class_list": batch_classes}
 
